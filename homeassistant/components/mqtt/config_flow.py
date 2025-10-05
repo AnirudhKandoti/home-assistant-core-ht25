@@ -986,12 +986,9 @@ def validate_sensor_platform_config(
     if (
         device_class in DEVICE_CLASS_UNITS
         and (unit_of_measurement := config.get(CONF_UNIT_OF_MEASUREMENT)) is None
-        and errors is not None
     ):
-        # Do not allow an empty unit of measurement in a subentry data flow
         errors[CONF_UNIT_OF_MEASUREMENT] = "uom_required_for_device_class"
         return errors
-
     if (
         device_class is not None
         and device_class in DEVICE_CLASS_UNITS
