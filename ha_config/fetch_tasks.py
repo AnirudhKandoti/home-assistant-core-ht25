@@ -1,9 +1,8 @@
 """Utilities to fetch Google Tasks data and OAuth tokens for Home Assistant."""
-
 # fetch_tasks.py
 import os
 import json
-import datetime
+from datetime import datetime, timezone
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 
@@ -16,7 +15,6 @@ MAX_TASKS = 50
 # Load credentials
 if not os.path.exists(TOKEN_PATH):
     raise SystemExit(f"token.json not found at {TOKEN_PATH}; run get_tasks_oauth.py first")
-
 creds = Credentials.from_authorized_user_file(TOKEN_PATH)
 
 # Build service
@@ -34,7 +32,7 @@ if not selected_list_id and tasklists:
 if not selected_list_id:
     raise SystemExit("No tasklist found")
 
-# Fetch tasks 
+# Fetch tasks
 tasks_res = (
     service.tasks()
     .list(tasklist=selected_list_id, maxResults=MAX_TASKS, showCompleted=False)
@@ -50,19 +48,23 @@ for it in items:
             "id": it.get("id"),
             "title": it.get("title"),
             "notes": it.get("notes"),
-            "status": it.get("status"),  # needsAction or completed
-            "due": it.get("due"),        # RFC3339 timestamp or None
-            "updated": it.get("updated"),
+            "status": it.get("status"),   # needsAction or completed
+            "due": it.get("due"),         # RFC3339 timestamp or None
+            "updated": it.get("updated"), # RFC3339 timestamp
         }
     )
 
 # Write JSON
 os.makedirs(HA_WWW_PATH, exist_ok=True)
 out_path = os.path.join(HA_WWW_PATH, "tasks.json")
+
+# timezone-aware UTC timestamp with 'Z' suffix (RFC3339)
+last_updated = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(
         {
-            "last_updated": datetime.datetime.utcnow().isoformat() + "Z",
+            "last_updated": last_updated,
             "count": len(tasks_out),
             "tasks": tasks_out,
         },
