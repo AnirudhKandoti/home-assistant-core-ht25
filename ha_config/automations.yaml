@@ -1,0 +1,216 @@
+
+
+# 1) Notify whenever Google Tasks really change
+- alias: Notify when Google Tasks change
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: sensor.google_tasks
+      attribute: last_updated # triggers even if count stays the same
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "Tasks Updated"
+        message: >
+          You now have {{ states('sensor.google_tasks') }} task(s).
+
+# 2) Tasks vs Weather suggestions
+- id: tasks_weather_per_task_context_ts
+  alias: Tasks vs Weather suggestions
+  initial_state: true
+  mode: parallel
+
+  trigger:
+    - platform: state
+      entity_id: sensor.google_tasks
+      attribute: last_updated
+    - platform: time
+      at: "07:00:00"
+
+  variables:
+    # Normalize tasks (list or JSON string)
+    tasks: >
+      {% set t = state_attr('sensor.google_tasks','tasks') %}
+      {% if t is string %}
+        {% if t|trim|length > 0 %}{{ t|from_json }}{% else %}{{ [] }}{% endif %}
+      {% elif t %}
+        {{ t }}
+      {% else %}
+        {{ [] }}
+      {% endif %}
+
+    # Compare days using timestamps
+    today_str: "{{ now().strftime('%Y-%m-%d') }}"
+    today_ts: "{{ as_timestamp(today_str) }}"
+
+  action:
+    - service: system_log.write
+      data:
+        message: "Per-task CONTEXT(TS) running; parsed {{ tasks|count }} task(s)"
+        level: info
+
+    - repeat:
+        for_each: "{{ tasks }}"
+        sequence:
+          - variables:
+              t: "{{ repeat.item }}"
+              title: "{{ t.title | default(t['title'] if 'title' in t else 'Untitled') }}"
+              tid: "{{ t.id | default(t['id'] if 'id' in t else 'unknown') }}"
+              title_l: "{{ (title|string)|lower }}"
+
+              #  Due date handling
+              due_raw: "{{ t.due | default(t['due'] if 'due' in t else '') }}"
+              due_str10: >
+                {% set s = (due_raw|string) %}
+                {% if s|length >= 10 %}{{ s[:10] }}{% else %}{{ today_str }}{% endif %}
+              due_ts: "{{ as_timestamp(due_str10) }}"
+              d: "{{ ((due_ts - today_ts) / 86400) | int }}"
+              in_window: "{{ 0 <= d <= 4 }}"
+              when_text: >-
+                {% if d == 0 %}today{% elif d == 1 %}tomorrow{% elif d > 1 %}in {{ d }} days{% elif d == -1 %}yesterday{% else %}{{ due_str10 }}{% endif %}
+
+              #  Forecast reads only when inside 5-day window
+              cond: >-
+                {% if in_window %}{{ states('sensor.home_condition_day_' ~ d) }}{% else %}out of window{% endif %}
+              cond_l: "{{ (cond or '') | lower }}"
+              wind: >-
+                {% if in_window %}{{ states('sensor.home_wind_speed_day_' ~ d) }}{% else %}n/a{% endif %}
+              uv: >-
+                {% if in_window %}{{ states('sensor.home_uv_index_day_' ~ d) }}{% else %}n/a{% endif %}
+              aq: >-
+                {% if in_window %}{{ states('sensor.home_air_quality_day_' ~ d) }}{% else %}n/a{% endif %}
+
+              #  Activity classification
+              is_outdoor: >
+                {{  'walk' in title_l or 'run' in title_l or 'jog' in title_l or
+                    'football' in title_l or 'soccer' in title_l or 'cricket' in title_l or
+                    'basketball' in title_l or 'tennis' in title_l or 'badminton' in title_l or
+                    'cycling' in title_l or 'bike' in title_l or 'bicycle' in title_l or
+                    'hike' in title_l or 'trail' in title_l or 'trek' in title_l or
+                    'swim' in title_l or 'beach' in title_l or 'surf' in title_l or
+                    'park' in title_l or 'picnic' in title_l or 'garden' in title_l or
+                    'yard' in title_l or 'outdoor' in title_l or
+                    'shopping' in title_l or 'market' in title_l or
+                    'groceries' in title_l or 'travel' in title_l or 'trip' in title_l or 'flight' in title_l }}
+              is_indoor: >
+                {{  'gym' in title_l or 'workout' in title_l or 'weights' in title_l or
+                    'yoga' in title_l or 'pilates' in title_l or 'stretch' in title_l or
+                    'study' in title_l or 'read' in title_l or 'assignment' in title_l or 'project' in title_l or
+                    'meeting' in title_l or 'standup' in title_l or 'office' in title_l or 'presentation' in title_l or
+                    'class' in title_l or 'lecture' in title_l or 'exam' in title_l or
+                    'cook' in title_l or 'meal prep' in title_l or 'bake' in title_l or
+                    'clean' in title_l or 'laundry' in title_l or 'vacuum' in title_l or
+                    'movie' in title_l or 'series' in title_l or 'university' in title_l or
+                    'indoor' in title_l }}
+
+              is_either: >
+                {{ 'photoshoot' in title_l or 'photography' in title_l or 'coffee' in title_l or 'meet friend' in title_l }}
+
+              #  Advice logic (weather vs activity)
+              advice: >-
+                {% if not in_window %}
+                  You have *{{ title }}* scheduled for {{ when_text }}, but that date is outside AccuWeather  5-day window. Will recheck when date moves into window.
+                {% else %}
+                  {% set rainy = 'rain' in cond_l or 'shower' in cond_l or 'storm' in cond_l or 'snow' in cond_l %}
+                  {% set windy = 'wind' in cond_l %}
+                  {% set cloudy = 'cloud' in cond_l or 'overcast' in cond_l %}
+                  {% set sunny  = 'sun' in cond_l or 'clear' in cond_l %}
+
+                  {% set travel_needed = (
+                        'gym' in title_l or 'class' in title_l or 'lecture' in title_l or
+                        'university' in title_l or 'university' in title_l or
+                        'office' in title_l or 'meeting' in title_l or
+                        'training' in title_l or 'yoga' in title_l or
+                        'seminar' in title_l or 'exam' in title_l
+                      ) %}
+
+                  {% if rainy %}
+                    {% if is_outdoor %}
+                      You have *{{ title }}* scheduled for {{ when_text }}; weather on this day is {{ cond }} — ☔ Don’t forget to carry an umbrella!
+                    {% elif is_indoor %}
+                      You have *{{ title }}* scheduled for {{ when_text }}; weather is {{ cond }} — great day to stay indoors.
+                      {% if travel_needed %}Since you’ll travel, ☔ carry an umbrella just in case!{% endif %}
+                    {% elif is_either %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — suitable for indoor hangouts.
+                      {% if travel_needed %}☔ Bring an umbrella if heading out.{% endif %}
+                    {% else %}
+                      *{{ title }}* on {{ when_text }}; weather is {{ cond }} — plan accordingly.
+                    {% endif %}
+
+                  {% elif windy %}
+                    {% if is_outdoor %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — still okay, but secure loose items and wear something warm. 💨
+                    {% elif is_indoor %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — ideal to focus indoors. 🧘
+                      {% if travel_needed %}💨 Be cautious of gusty conditions while commuting.{% endif %}
+                    {% else %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — be prepared for wind when outdoors.
+                    {% endif %}
+
+                  {% elif cloudy %}
+                    {% if is_outdoor %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — mild weather, perfect for an outdoor session. 🌤
+                      {% if uv|float(0) > 5 %}☀ Don’t forget sunscreen, UV index is {{ uv }}!{% endif %}
+                    {% elif is_indoor %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — nice light for studying or working indoors.
+                      {% if travel_needed and uv|float(0) > 5 %}☀ Apply sunscreen if you’ll walk outside; UV {{ uv }}.{% endif %}
+                    {% else %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — generally pleasant, good for both indoor and outdoor plans.
+                    {% endif %}
+
+                  {% elif sunny %}
+                    {% if is_outdoor %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — ☀ perfect for outdoor activities! Don’t forget sunscreen (UV: {{ uv }}).
+                    {% elif is_indoor %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — bright day outside — perfect for focusing indoors. 🌤
+                      {% if travel_needed %}☀ Apply sunscreen before heading out; UV index {{ uv }}.{% endif %}
+                    {% elif is_either %}
+                      *{{ title }}* on {{ when_text }}; {{ cond }} — great conditions to grab a coffee or meet outdoors. ☀
+                      {% if uv|float(0) > 5 %}☀ UV {{ uv }} — apply sunscreen!{% endif %}
+                    {% else %}
+                      *{{ title }}* on {{ when_text }}; weather looks {{ cond }} — ideal conditions today. ☀
+                      {% if uv|float(0) > 5 %}☀ Remember sunscreen — UV index {{ uv }}.{% endif %}
+                    {% endif %}
+
+                  {% else %}
+                    *{{ title }}* on {{ when_text }}; forecast is {{ cond }} — monitor closer to date.
+                  {% endif %}
+                {% endif %}
+
+          - service: persistent_notification.create
+            data:
+              title: "Task Weather Check"
+              message: >-
+                {{ advice }}
+                {% if in_window %} · Wind: {{ wind }} km/h · UV: {{ uv }} · Air: {{ aq }}{% endif %}
+              notification_id: "task_{{ tid }}_{{ due_str10 }}"
+
+# 3) Fetch Google Tasks on startup
+- alias: Fetch Google Tasks on startup
+  mode: single
+  trigger:
+    - platform: homeassistant
+      event: start
+  action:
+    - service: shell_command.fetch_google_tasks
+    - delay: "00:00:03"
+    - service: homeassistant.update_entity
+      target:
+        entity_id: sensor.google_tasks
+
+# 4) Fetch Google Tasks every 2 minutes
+- alias: Fetch Google Tasks every 2 minutes
+  mode: single
+  trigger:
+    - platform: time_pattern
+      minutes: "/2"
+  action:
+    - service: shell_command.fetch_google_tasks
+    - delay: "00:00:03"
+    - service: homeassistant.update_entity
+      target:
+        entity_id: sensor.google_tasks
+    - service: system_log.write
+      data:
+        message: "⏰ Ran fetch_google_tasks and updated google_tasks sensor"
+        level: info
